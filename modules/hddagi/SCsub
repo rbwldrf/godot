@@ -1,0 +1,16 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import('env')
+Import("env_modules")
+
+
+env_hddagi = env_modules.Clone()
+
+# Source files
+sources = [
+    "hddagi_sdf_scene.cpp",
+    "register_types.cpp"
+]
+
+env_hddagi.add_source_files(env.modules_sources, "*.cpp")

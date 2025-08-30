@@ -1,0 +1,16 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+
+Import('env')
+Import("env_modules")
+
+
+env_rc = env_modules.Clone()
+
+# Source files
+sources = [
+    "sdf_radiance_cascades.cpp",
+    "register_types.cpp"
+]
+
+env_rc.add_source_files(env.modules_sources, "*.cpp")
