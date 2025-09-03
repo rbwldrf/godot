@@ -33,12 +33,24 @@
 #include "enet_connection.h"
 #include "enet_multiplayer_peer.h"
 #include "enet_packet_peer.h"
+#include "enet_networking_server.h"
 
 #include "core/error/error_macros.h"
+#include "servers/networking_server.h"
 
 static bool enet_ok = false;
 
+static NetworkingServer *_createENetNetworkingServerCallback() {
+	return memnew(ENetNetworkingServer);
+}
+
 void initialize_enet_module(ModuleInitializationLevel p_level) {
+	if (p_level == MODULE_INITIALIZATION_LEVEL_SERVERS) {
+		NetworkingServerManager::get_singleton()->register_server("ENet", callable_mp_static(_createENetNetworkingServerCallback));
+		NetworkingServerManager::get_singleton()->set_default_server("ENet");
+		return;
+	}
+
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
@@ -52,6 +64,7 @@ void initialize_enet_module(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(ENetMultiplayerPeer);
 	GDREGISTER_ABSTRACT_CLASS(ENetPacketPeer);
 	GDREGISTER_CLASS(ENetConnection);
+	GDREGISTER_CLASS(ENetNetworkingServer);
 }
 
 void uninitialize_enet_module(ModuleInitializationLevel p_level) {

@@ -71,6 +71,7 @@
 #include "servers/camera_server.h"
 #include "servers/display_server.h"
 #include "servers/movie_writer/movie_writer.h"
+#include "servers/networking_server.h"
 #include "servers/register_server_types.h"
 #include "servers/rendering/rendering_server_default.h"
 #include "servers/text/text_server_dummy.h"
@@ -182,6 +183,9 @@ static PhysicsServer2D *physics_server_2d = nullptr;
 #ifndef PHYSICS_3D_DISABLED
 static PhysicsServer3DManager *physics_server_3d_manager = nullptr;
 static PhysicsServer3D *physics_server_3d = nullptr;
+
+static NetworkingServerManager *networking_server_manager = nullptr;
+static NetworkingServer *networking_server = nullptr;
 #endif // PHYSICS_3D_DISABLED
 #ifndef XR_DISABLED
 static XRServer *xr_server = nullptr;
@@ -398,6 +402,30 @@ void finalize_physics() {
 	physics_server_2d->finish();
 	memdelete(physics_server_2d);
 #endif // PHYSICS_2D_DISABLED
+}
+
+void initialize_networking() {
+	networking_server = NetworkingServerManager::get_singleton()->new_server(
+			GLOBAL_GET(NetworkingServerManager::setting_property_name));
+	if (!networking_server) {
+		networking_server = NetworkingServerManager::get_singleton()->new_default_server();
+	}
+
+	if (!networking_server) {
+		WARN_PRINT(vformat("No networking server found. Networking functionality may be limited. Check the %s project setting.", NetworkingServerManager::setting_property_name));
+		return;
+	}
+
+	ERR_FAIL_NULL(networking_server);
+	networking_server->init();
+}
+
+void finalize_networking() {
+	if (networking_server) {
+		networking_server->finish();
+		memdelete(networking_server);
+		networking_server = nullptr;
+	}
 }
 
 void finalize_display() {
@@ -888,6 +916,9 @@ void Main::test_cleanup() {
 		memdelete(physics_server_2d_manager);
 	}
 #endif // PHYSICS_2D_DISABLED
+	if (networking_server_manager) {
+		memdelete(networking_server_manager);
+	}
 	if (globals) {
 		memdelete(globals);
 	}
@@ -3106,6 +3137,8 @@ Error Main::setup2(bool p_show_boot_logo) {
 	physics_server_2d_manager = memnew(PhysicsServer2DManager);
 #endif // PHYSICS_2D_DISABLED
 
+	networking_server_manager = memnew(NetworkingServerManager);
+
 	register_server_types();
 	{
 		OS::get_singleton()->benchmark_begin_measure("Servers", "Modules and Extensions");
@@ -3700,6 +3733,10 @@ Error Main::setup2(bool p_show_boot_logo) {
 	MAIN_PRINT("Main: Load Physics");
 
 	initialize_physics();
+
+	MAIN_PRINT("Main: Load Networking");
+
+	initialize_networking();
 
 	register_server_singletons();
 
@@ -5034,6 +5071,7 @@ void Main::cleanup(bool p_force) {
 	NavigationServer3DManager::finalize_server();
 #endif // NAVIGATION_3D_DISABLED
 	finalize_physics();
+	finalize_networking();
 
 	GDExtensionManager::get_singleton()->deinitialize_extensions(GDExtension::INITIALIZATION_LEVEL_SERVERS);
 	uninitialize_modules(MODULE_INITIALIZATION_LEVEL_SERVERS);
@@ -5089,6 +5127,9 @@ void Main::cleanup(bool p_force) {
 		memdelete(physics_server_2d_manager);
 	}
 #endif // PHYSICS_2D_DISABLED
+	if (networking_server_manager) {
+		memdelete(networking_server_manager);
+	}
 	if (globals) {
 		memdelete(globals);
 	}

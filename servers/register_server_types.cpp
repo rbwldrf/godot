@@ -76,6 +76,7 @@
 #include "text/text_server_dummy.h"
 #include "text/text_server_extension.h"
 #include "text_server.h"
+#include "networking_server.h"
 #ifndef DISABLE_DEPRECATED
 #include "audio/effects/audio_effect_limiter.h"
 #endif
@@ -330,6 +331,14 @@ void register_server_types() {
 	PhysicsServer3DManager::get_singleton()->register_server("Dummy", callable_mp_static(_create_dummy_physics_server_3d));
 #endif // PHYSICS_3D_DISABLED
 
+	// Networking
+	GDREGISTER_CLASS(NetworkingServerManager);
+	Engine::get_singleton()->add_singleton(Engine::Singleton("NetworkingServerManager", NetworkingServerManager::get_singleton(), "NetworkingServerManager"));
+
+	GDREGISTER_ABSTRACT_CLASS(NetworkingServer);
+
+	GLOBAL_DEF(PropertyInfo(Variant::STRING, NetworkingServerManager::setting_property_name, PROPERTY_HINT_ENUM, "DEFAULT"), "DEFAULT");
+
 #ifndef XR_DISABLED
 	GDREGISTER_ABSTRACT_CLASS(XRInterface);
 	GDREGISTER_CLASS(XRVRS);
@@ -387,6 +396,7 @@ void register_server_singletons() {
 #ifndef XR_DISABLED
 	Engine::get_singleton()->add_singleton(Engine::Singleton("XRServer", XRServer::get_singleton(), "XRServer"));
 #endif // XR_DISABLED
+	Engine::get_singleton()->add_singleton(Engine::Singleton("NetworkingServer", NetworkingServer::get_singleton(), "NetworkingServer"));
 
 	OS::get_singleton()->benchmark_end_measure("Servers", "Register Singletons");
 }
