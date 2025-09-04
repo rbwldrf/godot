@@ -3,6 +3,8 @@
 #include "core/io/ip.h"
 #include "core/os/os.h"
 #include "core/string/print_string.h"
+#include "core/debugger/engine_debugger.h"
+#include "core/debugger/remote_debugger.h"
 #include <steam/steamnetworkingsockets_flat.h>
 
 GameNetworkingSocketsPeer::GameNetworkingSocketsPeer() {
@@ -15,11 +17,9 @@ GameNetworkingSocketsPeer::GameNetworkingSocketsPeer() {
 	networking_sockets = SteamNetworkingSockets();
 	ERR_FAIL_NULL_MSG(networking_sockets, "Failed to get SteamNetworkingSockets interface.");
 	
-	// Set up global connection status change callback
-	SteamNetworkingUtils()->SetGlobalCallback_SteamNetConnectionStatusChanged(_connection_status_changed_callback);
-	
-	// Initialize static map if needed
+	// Set up global connection status change callback only once
 	if (connection_to_instance.is_empty()) {
+		SteamNetworkingUtils()->SetGlobalCallback_SteamNetConnectionStatusChanged(_connection_status_changed_callback);
 		print_line("Initialized GameNetworkingSockets global callback system");
 	}
 	
@@ -36,11 +36,14 @@ GameNetworkingSocketsPeer::~GameNetworkingSocketsPeer() {
 void GameNetworkingSocketsPeer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("create_server", "port", "max_clients"), &GameNetworkingSocketsPeer::create_server, DEFVAL(32));
 	ClassDB::bind_method(D_METHOD("create_client", "address", "port"), &GameNetworkingSocketsPeer::create_client);
+	ClassDB::bind_method(D_METHOD("is_server"), &GameNetworkingSocketsPeer::is_server);
 	
 	ClassDB::bind_method(D_METHOD("configure_connection_lanes", "num_lanes"), &GameNetworkingSocketsPeer::configure_connection_lanes);
 	ClassDB::bind_method(D_METHOD("set_bandwidth_limit", "bytes_per_second"), &GameNetworkingSocketsPeer::set_bandwidth_limit);
 	ClassDB::bind_method(D_METHOD("get_round_trip_time"), &GameNetworkingSocketsPeer::get_round_trip_time);
 	ClassDB::bind_method(D_METHOD("set_encryption_key", "key"), &GameNetworkingSocketsPeer::set_encryption_key);
+	ClassDB::bind_method(D_METHOD("get_connection_stats"), &GameNetworkingSocketsPeer::get_connection_stats);
+	ClassDB::bind_method(D_METHOD("get_connection_quality"), &GameNetworkingSocketsPeer::get_connection_quality);
 }
 
 Error GameNetworkingSocketsPeer::create_server(int p_port, int p_max_clients) {
@@ -68,6 +71,7 @@ Error GameNetworkingSocketsPeer::create_server(int p_port, int p_max_clients) {
 
 	connection_status = CONNECTION_CONNECTED;
 	unique_id = 1; // Server is always ID 1
+	is_server_instance = true;
 	
 	// Register this server instance for handling incoming connections
 	listen_socket_to_instance[listen_socket] = this;
@@ -94,13 +98,21 @@ Error GameNetworkingSocketsPeer::create_client(const String &p_address, int p_po
 	HSteamNetConnection connection = networking_sockets->ConnectByIPAddress(server_addr, 0, nullptr);
 	ERR_FAIL_COND_V_MSG(connection == k_HSteamNetConnection_Invalid, ERR_CANT_CONNECT, "Failed to create connection to server.");
 
+	// Create poll group for receiving messages
+	poll_group = networking_sockets->CreatePollGroup();
+	ERR_FAIL_COND_V_MSG(poll_group == k_HSteamNetPollGroup_Invalid, ERR_CANT_CREATE, "Failed to create poll group for client.");
+
 	// Store the connection
 	peer_connections[1] = connection; // Server is peer ID 1
 	connection_to_peer[connection] = 1;
 	connection_to_instance[connection] = this; // Register for callbacks
 
+	// Add connection to poll group for message receiving
+	networking_sockets->SetConnectionPollGroup(connection, poll_group);
+
 	connection_status = CONNECTION_CONNECTING;
 	unique_id = 0; // Will be assigned by server during handshake
+	is_server_instance = false;
 	
 	print_line("GameNetworkingSockets client connecting to " + p_address + ":" + itos(p_port));
 	return OK;
@@ -148,6 +160,7 @@ void GameNetworkingSocketsPeer::close() {
 	unique_id = 0;
 	target_peer = 0;
 	next_peer_id = 2;
+	is_server_instance = false;
 }
 
 void GameNetworkingSocketsPeer::disconnect_peer(int p_peer, bool p_force) {
@@ -171,7 +184,7 @@ bool GameNetworkingSocketsPeer::is_refusing_new_connections() const {
 }
 
 bool GameNetworkingSocketsPeer::is_server() const {
-	return unique_id == 1;
+	return is_server_instance;
 }
 
 void GameNetworkingSocketsPeer::set_transfer_channel(int p_channel) {
@@ -230,7 +243,14 @@ Error GameNetworkingSocketsPeer::get_packet(const uint8_t **r_buffer, int &r_buf
 
 Error GameNetworkingSocketsPeer::put_packet(const uint8_t *p_buffer, int p_buffer_size) {
 	ERR_FAIL_NULL_V_MSG(networking_sockets, ERR_UNCONFIGURED, "GameNetworkingSockets not initialized.");
-	ERR_FAIL_COND_V_MSG(connection_status != CONNECTION_CONNECTED, ERR_UNCONFIGURED, "Not connected.");
+	
+	// For clients, check if connected to server
+	// For servers, check if we have at least one peer connection
+	if (is_server()) {
+		ERR_FAIL_COND_V_MSG(peer_connections.is_empty(), ERR_UNCONFIGURED, "Server has no connected peers.");
+	} else {
+		ERR_FAIL_COND_V_MSG(connection_status != CONNECTION_CONNECTED, ERR_UNCONFIGURED, "Not connected to server.");
+	}
 
 	// Determine send flags based on transfer mode
 	int send_flags = k_nSteamNetworkingSend_Reliable;
@@ -242,10 +262,16 @@ Error GameNetworkingSocketsPeer::put_packet(const uint8_t *p_buffer, int p_buffe
 
 	if (target_peer == 0) {
 		// Send to all peers
+		print_line("Broadcasting packet to " + itos(peer_connections.size()) + " peers");
 		for (const KeyValue<int, HSteamNetConnection> &pair : peer_connections) {
 			EResult result = networking_sockets->SendMessageToConnection(pair.value, p_buffer, p_buffer_size, send_flags, nullptr);
 			if (result != k_EResultOK) {
-				ERR_PRINT("Failed to send message to peer " + itos(pair.key));
+				ERR_PRINT("Failed to send message to peer " + itos(pair.key) + ": " + itos(result));
+			} else {
+				print_line("Sent packet to peer " + itos(pair.key));
+#ifdef DEBUG_ENABLED
+				_profile_bandwidth("out", p_buffer_size);
+#endif
 			}
 		}
 	} else {
@@ -253,8 +279,17 @@ Error GameNetworkingSocketsPeer::put_packet(const uint8_t *p_buffer, int p_buffe
 		auto it = peer_connections.find(target_peer);
 		ERR_FAIL_COND_V_MSG(it == peer_connections.end(), ERR_INVALID_PARAMETER, "Target peer not found: " + itos(target_peer));
 		
+		print_line("Sending packet to peer " + itos(target_peer));
 		EResult result = networking_sockets->SendMessageToConnection(it->value, p_buffer, p_buffer_size, send_flags, nullptr);
-		ERR_FAIL_COND_V_MSG(result != k_EResultOK, ERR_CANT_CONNECT, "Failed to send message to peer " + itos(target_peer));
+		if (result != k_EResultOK) {
+			ERR_PRINT("Failed to send message to peer " + itos(target_peer) + ": " + itos(result));
+			return ERR_CANT_CONNECT;
+		} else {
+			print_line("Successfully sent packet to peer " + itos(target_peer));
+#ifdef DEBUG_ENABLED
+			_profile_bandwidth("out", p_buffer_size);
+#endif
+		}
 	}
 
 	return OK;
@@ -277,7 +312,13 @@ void GameNetworkingSocketsPeer::set_bandwidth_limit(int p_bytes_per_second) {
 }
 
 float GameNetworkingSocketsPeer::get_round_trip_time() const {
-	// TODO: Return actual RTT from GameNetworkingSockets
+	if (!is_server() && !peer_connections.is_empty()) {
+		HSteamNetConnection server_conn = peer_connections.begin()->value;
+		SteamNetConnectionRealTimeStatus_t status;
+		if (networking_sockets->GetConnectionRealTimeStatus(server_conn, &status, 0, nullptr) == k_EResultOK) {
+			return status.m_nPing * 1000.0f;
+		}
+	}
 	return 0.0f;
 }
 
@@ -330,14 +371,25 @@ void GameNetworkingSocketsPeer::_process_incoming_messages() {
 		
 		int peer_id = _get_peer_id_for_connection(msg->m_conn);
 		if (peer_id != -1) {
-			PendingPacket packet;
-			packet.data.resize(msg->m_cbSize);
-			memcpy(packet.data.ptrw(), msg->m_pData, msg->m_cbSize);
-			packet.from_peer = peer_id;
-			packet.channel = 0; // TODO: Handle channels
-			packet.mode = TRANSFER_MODE_RELIABLE; // TODO: Detect transfer mode
-			
-			incoming_packets.push_back(packet);
+			// Check if this is a handshake packet
+			if (msg->m_cbSize >= 4 && 
+				((uint8_t*)msg->m_pData)[0] == 0xFF && 
+				((uint8_t*)msg->m_pData)[1] == 0xFE) {
+				_handle_handshake_packet((uint8_t*)msg->m_pData, msg->m_cbSize, msg->m_conn);
+			} else {
+				// Regular game packet
+				PendingPacket packet;
+				packet.data.resize(msg->m_cbSize);
+				memcpy(packet.data.ptrw(), msg->m_pData, msg->m_cbSize);
+				packet.from_peer = peer_id;
+				packet.channel = 0; // TODO: Handle channels
+				packet.mode = TRANSFER_MODE_RELIABLE; // TODO: Detect transfer mode
+				
+				incoming_packets.push_back(packet);
+#ifdef DEBUG_ENABLED
+				_profile_bandwidth("in", msg->m_cbSize);
+#endif
+			}
 		}
 		
 		msg->Release();
@@ -391,20 +443,28 @@ HashMap<HSteamListenSocket, GameNetworkingSocketsPeer*> GameNetworkingSocketsPee
 
 // Static callback function
 void GameNetworkingSocketsPeer::_connection_status_changed_callback(SteamNetConnectionStatusChangedCallback_t *pInfo) {
+	print_line("CALLBACK: Connection " + itos(pInfo->m_hConn) + " state changed: " + itos(pInfo->m_eOldState) + " -> " + itos(pInfo->m_info.m_eState));
+	
 	// Find the peer instance that owns this connection
 	auto it = connection_to_instance.find(pInfo->m_hConn);
 	if (it != connection_to_instance.end()) {
+		print_line("CALLBACK: Found existing connection mapping, forwarding to instance");
 		it->value->_handle_connection_status_changed(pInfo);
 	} else if (pInfo->m_eOldState == k_ESteamNetworkingConnectionState_None && 
 		       pInfo->m_info.m_eState == k_ESteamNetworkingConnectionState_Connecting) {
 		// This is a new incoming connection - find any active server to handle it
+		print_line("DEBUG: New incoming connection detected: " + itos(pInfo->m_hConn));
+		print_line("DEBUG: Available servers in map: " + itos(listen_socket_to_instance.size()));
+		
 		GameNetworkingSocketsPeer *server_peer = nullptr;
 		
 		// Find the first active server instance
 		for (auto &pair : listen_socket_to_instance) {
 			GameNetworkingSocketsPeer *peer = pair.value;
+			print_line("DEBUG: Checking server with listen_socket: " + itos(pair.key) + " is_server: " + (peer->is_server() ? "yes" : "no"));
 			if (peer->is_server() && peer->listen_socket != k_HSteamListenSocket_Invalid) {
 				server_peer = peer;
+				print_line("DEBUG: Selected this server to handle connection");
 				break;
 			}
 		}
@@ -415,6 +475,7 @@ void GameNetworkingSocketsPeer::_connection_status_changed_callback(SteamNetConn
 			server_peer->_handle_connection_status_changed(pInfo);
 		} else {
 			print_line("ERROR: Incoming connection ", pInfo->m_hConn, " but no server found to handle it");
+			print_line("DEBUG: Total servers registered: " + itos(listen_socket_to_instance.size()));
 		}
 	}
 }
@@ -443,9 +504,21 @@ void GameNetworkingSocketsPeer::_handle_connection_status_changed(SteamNetConnec
 			break;
 			
 		case k_ESteamNetworkingConnectionState_Connected:
+			print_line("Connection " + itos(conn) + " reached connected state (is_server: " + (is_server() ? "yes" : "no") + ")");
 			if (connection_status == CONNECTION_CONNECTING) {
 				connection_status = CONNECTION_CONNECTED;
-				print_line("Connection established: " + itos(conn));
+				print_line("Peer connection status updated to CONNECTED");
+				
+				// For clients, assign the unique ID now that we're connected
+				if (!is_server() && unique_id == 0) {
+					unique_id = 2; // Temporary assignment until handshake
+					print_line("Client assigned temporary unique_id: " + itos(unique_id));
+				}
+				
+				// For servers, send handshake to newly connected client
+				if (is_server()) {
+					_send_handshake_to_client(conn);
+				}
 			}
 			break;
 			
@@ -461,5 +534,88 @@ void GameNetworkingSocketsPeer::_handle_connection_status_changed(SteamNetConnec
 			
 		default:
 			break;
+	}
+}
+
+// Network profiler integration
+void GameNetworkingSocketsPeer::_profile_bandwidth(const String &p_direction, int p_bytes) {
+	if (EngineDebugger::is_active()) {
+		Array values;
+		values.push_back(p_direction);
+		values.push_back(p_bytes);
+		values.push_back(OS::get_singleton()->get_ticks_msec());
+		EngineDebugger::get_singleton()->send_message("network:bandwidth", values);
+	}
+}
+
+Dictionary GameNetworkingSocketsPeer::get_connection_stats() {
+	Dictionary stats;
+	stats["peer_count"] = peer_connections.size();
+	stats["connection_status"] = connection_status;
+	stats["unique_id"] = unique_id;
+	stats["is_server"] = is_server();
+	return stats;
+}
+
+float GameNetworkingSocketsPeer::get_connection_quality() const {
+	if (!is_server() && !peer_connections.is_empty()) {
+		HSteamNetConnection server_conn = peer_connections.begin()->value;
+		SteamNetConnectionRealTimeStatus_t status;
+		if (networking_sockets->GetConnectionRealTimeStatus(server_conn, &status, 0, nullptr) == k_EResultOK) {
+			return status.m_flConnectionQualityLocal;
+		}
+	}
+	return 1.0f;
+}
+
+// Handshake implementation
+void GameNetworkingSocketsPeer::_send_handshake_to_client(HSteamNetConnection connection) {
+	// Create a simple handshake packet with the assigned peer ID
+	int client_peer_id = _get_peer_id_for_connection(connection);
+	if (client_peer_id != -1) {
+		uint8_t handshake_data[8];
+		handshake_data[0] = 0xFF; // Handshake marker
+		handshake_data[1] = 0xFE; // Handshake marker  
+		handshake_data[2] = 0x01; // Handshake type: ID assignment
+		handshake_data[3] = 0x00; // Reserved
+		// Store peer ID as 4 bytes
+		handshake_data[4] = (client_peer_id >> 24) & 0xFF;
+		handshake_data[5] = (client_peer_id >> 16) & 0xFF;
+		handshake_data[6] = (client_peer_id >> 8) & 0xFF;
+		handshake_data[7] = client_peer_id & 0xFF;
+		
+		EResult result = networking_sockets->SendMessageToConnection(connection, handshake_data, 8, k_nSteamNetworkingSend_Reliable, nullptr);
+		if (result == k_EResultOK) {
+			print_line("Sent handshake to client, assigned peer ID: " + itos(client_peer_id));
+		} else {
+			print_line("Failed to send handshake to client: " + itos(result));
+		}
+	}
+}
+
+void GameNetworkingSocketsPeer::_handle_handshake_packet(const uint8_t *data, int size, HSteamNetConnection from_connection) {
+	if (size >= 8 && data[0] == 0xFF && data[1] == 0xFE) {
+		if (data[2] == 0x01) { // ID assignment handshake
+			// Extract assigned peer ID
+			int assigned_id = (data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7];
+			unique_id = assigned_id;
+			print_line("Client received handshake: assigned peer ID " + itos(assigned_id));
+			
+			// Send acknowledgment back to server
+			uint8_t ack_data[4];
+			ack_data[0] = 0xFF; // Handshake marker
+			ack_data[1] = 0xFE; // Handshake marker
+			ack_data[2] = 0x02; // Handshake type: acknowledgment
+			ack_data[3] = 0x00; // Reserved
+			
+			EResult result = networking_sockets->SendMessageToConnection(from_connection, ack_data, 4, k_nSteamNetworkingSend_Reliable, nullptr);
+			if (result == k_EResultOK) {
+				print_line("Sent handshake acknowledgment to server");
+			} else {
+				print_line("Failed to send handshake acknowledgment: " + itos(result));
+			}
+		} else if (data[2] == 0x02) { // Acknowledgment from client
+			print_line("Server received handshake acknowledgment from client");
+		}
 	}
 }

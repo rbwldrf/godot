@@ -22,6 +22,7 @@ private:
 	int unique_id = 0;
 	int target_peer = 0;
 	bool refuse_new_connections = false;
+	bool is_server_instance = false;
 	TransferMode transfer_mode = TRANSFER_MODE_RELIABLE;
 	int transfer_channel = 0;
 
@@ -43,6 +44,8 @@ private:
 	int _get_peer_id_for_connection(HSteamNetConnection connection);
 	void _add_peer_connection(HSteamNetConnection connection);
 	void _remove_peer_connection(HSteamNetConnection connection);
+	void _send_handshake_to_client(HSteamNetConnection connection);
+	void _handle_handshake_packet(const uint8_t *data, int size, HSteamNetConnection from_connection);
 	
 	// Connection callback handling
 	static HashMap<HSteamNetConnection, GameNetworkingSocketsPeer*> connection_to_instance;
@@ -91,6 +94,13 @@ public:
 	void set_bandwidth_limit(int p_bytes_per_second);
 	float get_round_trip_time() const;
 	void set_encryption_key(const PackedByteArray &p_key);
+	
+	// Connection statistics and debugging
+	Dictionary get_connection_stats();
+	float get_connection_quality() const;
+	
+private:
+	void _profile_bandwidth(const String &p_direction, int p_bytes);
 };
 
 #endif // GAMENETWORKING_SOCKETS_PEER_H
