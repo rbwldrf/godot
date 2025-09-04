@@ -25,6 +25,7 @@ private:
 	bool is_server_instance = false;
 	TransferMode transfer_mode = TRANSFER_MODE_RELIABLE;
 	int transfer_channel = 0;
+	int last_received_peer = 0;
 
 	// GameNetworkingSockets interface
 	ISteamNetworkingSockets *networking_sockets = nullptr;
@@ -98,6 +99,9 @@ public:
 	// Connection statistics and debugging
 	Dictionary get_connection_stats();
 	float get_connection_quality() const;
+	
+	// Emit peer signals for already-connected peers (for late SceneMultiplayer setup)
+	void notify_connected_peers();
 	
 private:
 	void _profile_bandwidth(const String &p_direction, int p_bytes);

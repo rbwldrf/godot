@@ -44,6 +44,7 @@ void GameNetworkingSocketsPeer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_encryption_key", "key"), &GameNetworkingSocketsPeer::set_encryption_key);
 	ClassDB::bind_method(D_METHOD("get_connection_stats"), &GameNetworkingSocketsPeer::get_connection_stats);
 	ClassDB::bind_method(D_METHOD("get_connection_quality"), &GameNetworkingSocketsPeer::get_connection_quality);
+	ClassDB::bind_method(D_METHOD("notify_connected_peers"), &GameNetworkingSocketsPeer::notify_connected_peers);
 }
 
 Error GameNetworkingSocketsPeer::create_server(int p_port, int p_max_clients) {
@@ -161,6 +162,7 @@ void GameNetworkingSocketsPeer::close() {
 	target_peer = 0;
 	next_peer_id = 2;
 	is_server_instance = false;
+	last_received_peer = 0;
 }
 
 void GameNetworkingSocketsPeer::disconnect_peer(int p_peer, bool p_force) {
@@ -208,7 +210,7 @@ void GameNetworkingSocketsPeer::set_target_peer(int p_peer) {
 }
 
 int GameNetworkingSocketsPeer::get_packet_peer() const {
-	return 0; // TODO: Return actual packet peer
+	return last_received_peer;
 }
 
 int GameNetworkingSocketsPeer::get_packet_channel() const {
@@ -233,9 +235,14 @@ Error GameNetworkingSocketsPeer::get_packet(const uint8_t **r_buffer, int &r_buf
 	r_buffer_size = front->get().data.size();
 
 	// Store packet info for get_packet_peer() calls
-	target_peer = front->get().from_peer;
+	int from_peer = front->get().from_peer;
 	transfer_channel = front->get().channel;
 	transfer_mode = front->get().mode;
+	
+	// Store the peer ID for get_packet_peer() to return
+	last_received_peer = from_peer;
+	
+	print_line("DEBUG: get_packet() storing last_received_peer = " + itos(from_peer));
 
 	incoming_packets.pop_front();
 	return OK;
@@ -340,7 +347,7 @@ void GameNetworkingSocketsPeer::_process_connection_events() {
 		SteamNetConnectionInfo_t info;
 		if (networking_sockets->GetConnectionInfo(pair.value, &info)) {
 			// Debug: Print current connection state
-			print_line("Peer " + itos(pair.key) + " state: " + itos(info.m_eState) + " (" + String(info.m_szEndDebug) + ")");
+			//print_line("Peer " + itos(pair.key) + " state: " + itos(info.m_eState) + " (" + String(info.m_szEndDebug) + ")");
 			
 			if (info.m_eState == k_ESteamNetworkingConnectionState_Connected) {
 				if (connection_status == CONNECTION_CONNECTING) {
@@ -370,6 +377,7 @@ void GameNetworkingSocketsPeer::_process_incoming_messages() {
 		SteamNetworkingMessage_t *msg = messages[i];
 		
 		int peer_id = _get_peer_id_for_connection(msg->m_conn);
+		print_line("DEBUG: _process_incoming_messages - connection " + itos(msg->m_conn) + " mapped to peer_id " + itos(peer_id));
 		if (peer_id != -1) {
 			// Check if this is a handshake packet
 			if (msg->m_cbSize >= 4 && 
@@ -378,6 +386,7 @@ void GameNetworkingSocketsPeer::_process_incoming_messages() {
 				_handle_handshake_packet((uint8_t*)msg->m_pData, msg->m_cbSize, msg->m_conn);
 			} else {
 				// Regular game packet
+				print_line("DEBUG: Processing regular packet from peer " + itos(peer_id) + " size " + itos(msg->m_cbSize));
 				PendingPacket packet;
 				packet.data.resize(msg->m_cbSize);
 				memcpy(packet.data.ptrw(), msg->m_pData, msg->m_cbSize);
@@ -414,6 +423,10 @@ void GameNetworkingSocketsPeer::_add_peer_connection(HSteamNetConnection connect
 	}
 	
 	print_line("Added peer connection: " + itos(peer_id));
+	
+	// Emit peer_connected signal for SceneMultiplayer
+	print_line("DEBUG: Emitting peer_connected signal for peer " + itos(peer_id));
+	emit_signal("peer_connected", peer_id);
 }
 
 void GameNetworkingSocketsPeer::_remove_peer_connection(HSteamNetConnection connection) {
@@ -422,6 +435,9 @@ void GameNetworkingSocketsPeer::_remove_peer_connection(HSteamNetConnection conn
 		peer_connections.erase(peer_id);
 		connection_to_peer.erase(connection);
 		print_line("Removed peer connection: " + itos(peer_id));
+		
+		// Emit peer_disconnected signal for SceneMultiplayer
+		emit_signal("peer_disconnected", peer_id);
 	}
 }
 
@@ -513,6 +529,9 @@ void GameNetworkingSocketsPeer::_handle_connection_status_changed(SteamNetConnec
 				if (!is_server() && unique_id == 0) {
 					unique_id = 2; // Temporary assignment until handshake
 					print_line("Client assigned temporary unique_id: " + itos(unique_id));
+					
+					// Note: Don't emit peer_connected here - SceneMultiplayer might not be set up yet
+					// We'll emit it when SceneMultiplayer is connected via a separate mechanism
 				}
 				
 				// For servers, send handshake to newly connected client
@@ -529,6 +548,8 @@ void GameNetworkingSocketsPeer::_handle_connection_status_changed(SteamNetConnec
 			connection_to_instance.erase(conn);
 			if (peer_connections.is_empty() && !is_server()) {
 				connection_status = CONNECTION_DISCONNECTED;
+				// Emit peer_disconnected signal for server (peer ID 1)
+				emit_signal("peer_disconnected", 1);
 			}
 			break;
 			
@@ -555,6 +576,24 @@ Dictionary GameNetworkingSocketsPeer::get_connection_stats() {
 	stats["unique_id"] = unique_id;
 	stats["is_server"] = is_server();
 	return stats;
+}
+
+void GameNetworkingSocketsPeer::notify_connected_peers() {
+	print_line("DEBUG: notify_connected_peers() called");
+	
+	// For clients, emit peer_connected for server (peer ID 1) if we're connected
+	if (!is_server() && connection_status == CONNECTION_CONNECTED) {
+		print_line("DEBUG: Client emitting peer_connected for server");
+		emit_signal("peer_connected", 1);
+	}
+	
+	// For servers, emit peer_connected for all connected clients
+	if (is_server()) {
+		for (const KeyValue<int, HSteamNetConnection> &pair : peer_connections) {
+			print_line("DEBUG: Server emitting peer_connected for peer " + itos(pair.key));
+			emit_signal("peer_connected", pair.key);
+		}
+	}
 }
 
 float GameNetworkingSocketsPeer::get_connection_quality() const {
