@@ -28,6 +28,8 @@ sources = [
     "google/protobuf/unknown_field_set.cc"
     "google/protobuf/parse_context.cc"
 
+    "google/protobuf/stubs/common.cc"
+
     # ... and so on for all required protobuf source files
 ]
 

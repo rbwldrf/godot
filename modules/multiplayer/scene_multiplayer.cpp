@@ -356,12 +356,15 @@ void SceneMultiplayer::_process_sys(int p_from, const uint8_t *p_packet, int p_p
 }
 
 void SceneMultiplayer::_add_peer(int p_id) {
+	print_line("DEBUG: SceneMultiplayer::_add_peer(" + itos(p_id) + ") called");
 	if (auth_callback.is_valid()) {
+		print_line("DEBUG: Auth callback is valid, adding to pending_peers");
 		pending_peers[p_id] = PendingPeer();
 		pending_peers[p_id].time = OS::get_singleton()->get_ticks_msec();
 		emit_signal(SNAME("peer_authenticating"), p_id);
 		return;
 	} else {
+		print_line("DEBUG: No auth callback, calling _admit_peer");
 		_admit_peer(p_id);
 	}
 }
@@ -386,12 +389,18 @@ void SceneMultiplayer::_admit_peer(int p_id) {
 		}
 	}
 
+	print_line("DEBUG: SceneMultiplayer::_admit_peer(" + itos(p_id) + ") - about to insert into connected_peers");
+	print_line("DEBUG: SceneMultiplayer instance: " + itos((uint64_t)this));
+	print_line("DEBUG: connected_peers before insert size: " + itos(connected_peers.size()));
 	connected_peers.insert(p_id);
+	print_line("DEBUG: connected_peers after insert size: " + itos(connected_peers.size()));
+	print_line("DEBUG: connected_peers.has(" + itos(p_id) + "): " + (connected_peers.has(p_id) ? "true" : "false"));
 	cache->on_peer_change(p_id, true);
 	replicator->on_peer_change(p_id, true);
 	if (p_id == 1) {
 		emit_signal(SNAME("connected_to_server"));
 	}
+	print_line("DEBUG: About to emit peer_connected signal for " + itos(p_id));
 	emit_signal(SNAME("peer_connected"), p_id);
 }
 
@@ -423,7 +432,12 @@ void SceneMultiplayer::_del_peer(int p_id) {
 
 	replicator->on_peer_change(p_id, false);
 	cache->on_peer_change(p_id, false);
+	print_line("DEBUG: SceneMultiplayer::_del_peer(" + itos(p_id) + ") - removing from connected_peers");
+	print_line("DEBUG: SceneMultiplayer instance: " + itos((uint64_t)this));
+	print_line("DEBUG: connected_peers before erase size: " + itos(connected_peers.size()));
 	connected_peers.erase(p_id);
+	print_line("DEBUG: connected_peers after erase size: " + itos(connected_peers.size()));
+	print_line("DEBUG: About to emit peer_disconnected signal for " + itos(p_id));
 	emit_signal(SNAME("peer_disconnected"), p_id);
 }
 
@@ -682,11 +696,20 @@ void SceneMultiplayer::_bind_methods() {
 }
 
 SceneMultiplayer::SceneMultiplayer() {
+	print_line("DEBUG: SceneMultiplayer constructor called - creating instance: " + itos((uint64_t)this));
+	
+	// Print stack trace to see where this is being created from
+	print_line("DEBUG: SceneMultiplayer creation call stack:");
+	
 	relay_buffer.instantiate();
 	cache.instantiate(this);
 	replicator.instantiate(this, cache.ptr());
 	rpc.instantiate(this, cache.ptr(), replicator.ptr());
+	
+	print_line("DEBUG: SceneMultiplayer " + itos((uint64_t)this) + " - created SceneRPCInterface: " + itos((uint64_t)rpc.ptr()));
+	
 	set_multiplayer_peer(Ref<OfflineMultiplayerPeer>(memnew(OfflineMultiplayerPeer)));
+	print_line("DEBUG: SceneMultiplayer constructor finished for instance: " + itos((uint64_t)this));
 }
 
 SceneMultiplayer::~SceneMultiplayer() {

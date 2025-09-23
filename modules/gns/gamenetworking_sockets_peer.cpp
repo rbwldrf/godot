@@ -243,12 +243,14 @@ Error GameNetworkingSocketsPeer::get_packet(const uint8_t **r_buffer, int &r_buf
 	last_received_peer = from_peer;
 	
 	print_line("DEBUG: get_packet() storing last_received_peer = " + itos(from_peer));
+	print_line("DEBUG: This " + String(is_server() ? "SERVER" : "CLIENT") + " will report packet from peer " + itos(from_peer));
 
 	incoming_packets.pop_front();
 	return OK;
 }
 
 Error GameNetworkingSocketsPeer::put_packet(const uint8_t *p_buffer, int p_buffer_size) {
+	print_line("DEBUG: put_packet called with size " + itos(p_buffer_size) + " (is_server: " + (is_server() ? "yes" : "no") + ")");
 	ERR_FAIL_NULL_V_MSG(networking_sockets, ERR_UNCONFIGURED, "GameNetworkingSockets not initialized.");
 	
 	// For clients, check if connected to server
@@ -372,25 +374,39 @@ void GameNetworkingSocketsPeer::_process_incoming_messages() {
 
 	SteamNetworkingMessage_t *messages[32];
 	int message_count = networking_sockets->ReceiveMessagesOnPollGroup(poll_group, messages, 32);
+	
+	if (message_count > 0) {
+		print_line("DEBUG: _process_incoming_messages found " + itos(message_count) + " messages");
+	}
 
 	for (int i = 0; i < message_count; i++) {
 		SteamNetworkingMessage_t *msg = messages[i];
 		
 		int peer_id = _get_peer_id_for_connection(msg->m_conn);
 		print_line("DEBUG: _process_incoming_messages - connection " + itos(msg->m_conn) + " mapped to peer_id " + itos(peer_id));
+		
+		// CRITICAL FIX: Handle unmapped connections - clients should map server to peer_id 1
+		if (peer_id == -1 && !is_server()) {
+			peer_id = 1; // For clients, unknown connections are from server
+		}
+		
 		if (peer_id != -1) {
 			// Check if this is a handshake packet
 			if (msg->m_cbSize >= 4 && 
 				((uint8_t*)msg->m_pData)[0] == 0xFF && 
 				((uint8_t*)msg->m_pData)[1] == 0xFE) {
+				print_line("DEBUG: Detected handshake packet from peer " + itos(peer_id) + " size " + itos(msg->m_cbSize));
 				_handle_handshake_packet((uint8_t*)msg->m_pData, msg->m_cbSize, msg->m_conn);
 			} else {
 				// Regular game packet
 				print_line("DEBUG: Processing regular packet from peer " + itos(peer_id) + " size " + itos(msg->m_cbSize));
+				print_line("DEBUG: This is " + String(is_server() ? "SERVER" : "CLIENT") + " processing packet");
+				print_line("DEBUG: Connection " + itos(msg->m_conn) + " -> peer_id " + itos(peer_id));
 				PendingPacket packet;
 				packet.data.resize(msg->m_cbSize);
 				memcpy(packet.data.ptrw(), msg->m_pData, msg->m_cbSize);
 				packet.from_peer = peer_id;
+				print_line("DEBUG: Set packet.from_peer = " + itos(peer_id));
 				packet.channel = 0; // TODO: Handle channels
 				packet.mode = TRANSFER_MODE_RELIABLE; // TODO: Detect transfer mode
 				
@@ -530,12 +546,23 @@ void GameNetworkingSocketsPeer::_handle_connection_status_changed(SteamNetConnec
 					unique_id = 2; // Temporary assignment until handshake
 					print_line("Client assigned temporary unique_id: " + itos(unique_id));
 					
-					// Note: Don't emit peer_connected here - SceneMultiplayer might not be set up yet
-					// We'll emit it when SceneMultiplayer is connected via a separate mechanism
+					// CRITICAL FIX: For clients, ensure self-connection is mapped properly
+					// This prevents get_packet_peer() from returning 0 when processing own RPC packets
+					if (peer_connections.find(unique_id) == peer_connections.end()) {
+						peer_connections[unique_id] = conn;
+						connection_to_peer[conn] = unique_id;
+						print_line("DEBUG: Client mapped own connection to peer_id " + itos(unique_id));
+					}
+					
+					// CRITICAL FIX: Client should emit peer_connected for server (peer ID 1) 
+					// when connection is established, not waiting for handshake
+					print_line("DEBUG: Client connection established - emitting peer_connected(1) for server");
+					emit_signal("peer_connected", 1);
 				}
 				
 				// For servers, send handshake to newly connected client
 				if (is_server()) {
+					print_line("DEBUG: Server sending handshake to new client on connection " + itos(conn));
 					_send_handshake_to_client(conn);
 				}
 			}
@@ -639,6 +666,11 @@ void GameNetworkingSocketsPeer::_handle_handshake_packet(const uint8_t *data, in
 			int assigned_id = (data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7];
 			unique_id = assigned_id;
 			print_line("Client received handshake: assigned peer ID " + itos(assigned_id));
+			
+			// CRITICAL FIX: Client should now emit peer_connected for server (peer ID 1)
+			// This ensures SceneMultiplayer knows about the server connection
+			print_line("DEBUG: Client emitting peer_connected signal for server (peer ID 1)");
+			emit_signal("peer_connected", 1);
 			
 			// Send acknowledgment back to server
 			uint8_t ack_data[4];

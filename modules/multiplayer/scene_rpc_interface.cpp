@@ -136,10 +136,14 @@ Node *SceneRPCInterface::_process_get_node(int p_from, const uint8_t *p_packet, 
 		ERR_FAIL_COND_V_MSG(ofs >= p_packet_len, nullptr, "Invalid packet received. Size smaller than declared.");
 
 		String paths = String::utf8((const char *)&p_packet[ofs], p_packet_len - ofs);
+		print_line("DEBUG: RPC path extraction - ofs=" + itos(ofs) + " packet_len=" + itos(p_packet_len) + " data_len=" + itos(p_packet_len - ofs));
+		print_line("DEBUG: RPC path extracted: '" + paths + "' (length=" + itos(paths.length()) + ")");
 
 		NodePath np = paths;
+		print_line("DEBUG: NodePath created: '" + String(np) + "'");
 
 		node = root_node->get_node(np);
+		print_line("DEBUG: get_node() result: " + String(node ? "SUCCESS" : "nullptr"));
 
 		if (!node) {
 			ERR_PRINT("Failed to get path from RPC: " + String(np) + ".");
@@ -298,6 +302,19 @@ void SceneRPCInterface::_send_rpc(Node *p_node, int p_to, uint16_t p_rpc_id, con
 	ERR_FAIL_COND_MSG(p_argcount > 255, "Too many arguments (>255).");
 
 	if (p_to != 0 && !multiplayer->get_connected_peers().has(Math::abs(p_to))) {
+		print_line("DEBUG: RPC validation failed for peer " + itos(p_to));
+		print_line("DEBUG: SceneMultiplayer instance: " + itos((uint64_t)multiplayer));
+		print_line("DEBUG: multiplayer->get_connected_peers() size: " + itos(multiplayer->get_connected_peers().size()));
+		print_line("DEBUG: Math::abs(p_to): " + itos(Math::abs(p_to)));
+		print_line("DEBUG: multiplayer->get_connected_peers().has(" + itos(Math::abs(p_to)) + "): " + (multiplayer->get_connected_peers().has(Math::abs(p_to)) ? "true" : "false"));
+		
+		// List all peers in connected_peers
+		String peer_list = "";
+		for (const int &peer_id : multiplayer->get_connected_peers()) {
+			if (!peer_list.is_empty()) peer_list += ", ";
+			peer_list += itos(peer_id);
+		}
+		print_line("DEBUG: Current connected_peers: [" + peer_list + "]");
 		ERR_FAIL_COND_MSG(p_to == multiplayer->get_unique_id(), "Attempt to call RPC on yourself! Peer unique ID: " + itos(multiplayer->get_unique_id()) + ".");
 
 		ERR_FAIL_MSG("Attempt to call RPC with unknown peer ID: " + itos(p_to) + ".");

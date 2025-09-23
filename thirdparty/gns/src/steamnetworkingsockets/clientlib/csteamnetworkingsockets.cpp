@@ -5,6 +5,7 @@
 #include "steamnetworkingsockets_connections.h"
 #include "steamnetworkingsockets_udp.h"
 #include "../steamnetworkingsockets_certstore.h"
+#include "steamnetworkingtypes.h"
 #include "crypto.h"
 
 #ifdef STEAMNETWORKINGSOCKETS_STANDALONELIB
